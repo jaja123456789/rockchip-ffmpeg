@@ -15,7 +15,7 @@ with `ccache` enabled. I put two links in the script for setting up ccache. The 
 
 ### Preparation
 
-- Set the FFMPEG_COMPILE_DIR variable to the destination where all sources and built files will be placed.
+- Set the `FFMPEG_COMPILE_DIR` variable to the destination where all sources and built files will be placed.
 
 	Note! Everytime you open a new shell, you have to set all environment variables again!
 
@@ -28,10 +28,10 @@ Configure ffmpeg with the options, codecs etc. you need in the `PATH="$FFMPEG_BI
 - You have to export all environment variables. See the part `## Define environment variables` in [compile_ffmpeg_rockchip.sh](compile_ffmpeg_rockchip.sh).
 - Execute all commands
 	- Every command, which is not needed, is commented
-	- Compilation scripts are placed in blocks. You can recognize them by the backslashes at the end of a line `\`.
+	- Compile scripts are placed in blocks. You can recognize them by the backslashes at the end of a line `\`.
 	That means, you can copy the complete block.
 
-At the end you find mostly a `tail` command. Which opens a file, where the log of the compile process is written to the console output.
+At the end of each compile block you mostly find a `tail` command, which opens a file, where the log of the compile process is written to the console output.
 That's because the commands are run in the background, which you can recognize by the single `&` before the backslash at the end of the line
 and the following `disown` command.
 So you can let it run in the background and have no fear, that the SSH connection interrupts.
@@ -43,10 +43,12 @@ For example: `${MPP_SOURCES}/log-cmake-2019-09-02_01:00:48.txt`
 
 ## Software
 
-- [https://github.com/ayufan-rock64/linux-build/releases](Debian stretch minial from ayufan)
-- [nasm](https://www.nasm.us/) from the current debian ARM64 sources. The needed version is not in the stretch repositories.
+- [Debian stretch minial from ayufan](https://github.com/ayufan-rock64/linux-build/releases)
+- [nasm](https://www.nasm.us/) from the current debian ARM64 sources. The needed version is not in the stretch repositories of ARM64.
+So we get it from a newer debian version.
 The tutorial contains installation constructions for a working version.
-- [yasm](http://yasm.tortall.net/) from the current debian ARM64 sources. The needed version is not in the stretch repositories.
+- [yasm](http://yasm.tortall.net/) from the current debian ARM64 sources. The needed version is not in the stretch repositories of ARM64.
+So we get it from a newer debian version.
 The tutorial contains installation constructions for a working version.
 
 ## Hardware
@@ -57,11 +59,11 @@ The tutorial contains installation constructions for a working version.
 ### Additional information
 
 There are a few steps in the tutorial, such as the `make install` steps, for which I think, that you don't need them, but for me
-it worked. Maybe there are some misconfigurations in the system.
+it worked only with them. Maybe there are some misconfigurations in the system.
 
 Report me, if there are unneeded steps, errors or if you need more information to get it run.
 
-I will celebrate it, when the [https://trac.ffmpeg.org/wiki/HWAccelIntro](rockchip MPP API)
+I will celebrate it, when the [rockchip MPP API](https://trac.ffmpeg.org/wiki/HWAccelIntro)
 is fully implemented (that means the encoder) in the original ffmpeg project.
 
 # Original ffmpeg README
