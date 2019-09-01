@@ -167,6 +167,11 @@ sudo cp ${FFMPEG_SOURCES}/ffmpeg/ffmpeg ${FFMPEG_SOURCES}/ffmpeg/ffprobe /usr/lo
 ############### LD      ffprobe_g ######################
 ############### STRIP   ffprobe ########################
 
+## Check ffmpeg version
+ffmpeg -version
+### This should show ffmpeg version <git_hash>
+### You can verify the git hash with the one from this repository or with git log
+
 ##TODO man page configuration
 ##echo "MANPATH_MAP $HOME/bin $HOME/ffmpeg_build/share/man" >> ~/.manpath
 
