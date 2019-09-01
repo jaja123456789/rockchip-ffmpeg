@@ -3,9 +3,9 @@ FFmpeg README
 
 # Intention of this repository
 
-In this repository I maintain the [rockchip linux ffmpeg project](https://github.com/rockchip-linux/ffmpeg) ,
+In this repository I maintain the [rockchip linux ffmpeg project](https://github.com/rockchip-linux/ffmpeg),
 which implements the hardware encoding and decoding features for rockchip SoCs and merge them with
-changes from the [ffmpeg github repository](https://github.com/ffmpeg/ffmpeg) .
+changes from the [ffmpeg github repository](https://github.com/ffmpeg/ffmpeg).
 
 ## Compile it on rockchip
 
@@ -65,6 +65,17 @@ Report me, if there are unneeded steps, errors or if you need more information t
 
 I will celebrate it, when the [rockchip MPP API](https://trac.ffmpeg.org/wiki/HWAccelIntro)
 is fully implemented (that means the encoder) in the original ffmpeg project.
+
+## Merging strategy
+
+First I get the current state of the [rockchip linux ffmpeg project](https://github.com/rockchip-linux/ffmpeg) repository.
+Then I merge the current state of [ffmpeg github repository](https://github.com/ffmpeg/ffmpeg) into it.
+Merge errors are handled by:
+
+	- Use everything from [ffmpeg github repository](https://github.com/ffmpeg/ffmpeg)
+	- Keep everything related to `rkmpp` from [rockchip linux ffmpeg project](https://github.com/rockchip-linux/ffmpeg)
+		- As the decoders and encoders aren't expanded, but reimplemented for the rockchip platform and everything gets the `_rkmpp` suffix
+		it's safe to just get new changes and keep the rockchip decoders and enconders.
 
 # Original ffmpeg README
 
