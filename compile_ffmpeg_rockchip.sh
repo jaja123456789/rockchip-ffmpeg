@@ -160,7 +160,7 @@ disown && \
 cd ${FFMPEG_SOURCES} && \
 tail -f ${FFMPEG_SOURCES}/log-make-${BUILD_START_TIME}.txt
 
-sudo cp ${FFMPEG_SOURCES}/ffmpeg/ffmpeg ${FFMPEG_SOURCES}/ffmpeg/ffprobe /usr/lib/jellyfin-ffmpeg/
+sudo cp ${FFMPEG_SOURCES}/ffmpeg/ffmpeg ${FFMPEG_SOURCES}/ffmpeg/ffprobe /usr/lib/jellyfin-ffmpeg/ && \
 sudo cp ${FFMPEG_SOURCES}/ffmpeg/ffmpeg ${FFMPEG_SOURCES}/ffmpeg/ffprobe /usr/local/bin
 
 ############### Is done when message is: ###############
