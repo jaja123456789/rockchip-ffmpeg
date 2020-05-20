@@ -35,18 +35,23 @@
 #include "libavutil/hwcontext.h"
 #include "libavutil/hwcontext_drm.h"
 #include "libavutil/log.h"
+#include "libavutil/imgutils.h"
 
 // copy from mpp/base/inc/mpp_packet_impl.h
 #define MPP_PACKET_FLAG_INTRA       (0x00000008)
 
-#define SEND_FRAME_TIMEOUT          100
-#define RECEIVE_PACKET_TIMEOUT      100
+#define MPP_ALIGN(x, a)         (((x)+(a)-1)&~((a)-1))
+
+#define SEND_FRAME_TIMEOUT          500
+#define RECEIVE_PACKET_TIMEOUT      500
 
 typedef struct {
     MppCtx ctx;
     MppApi *mpi;
 
     char eos_reached;
+	
+	MppBuffer frm_buf;
 } RKMPPEncoder;
 
 typedef struct {
@@ -70,6 +75,7 @@ static MppCodingType rkmpp_get_codingtype(AVCodecContext *avctx)
 static MppFrameFormat rkmpp_get_mppformat(enum AVPixelFormat avformat)
 {
     switch (avformat) {
+	case AV_PIX_FMT_DRM_PRIME:		return -2;
     case AV_PIX_FMT_NV12:           return MPP_FMT_YUV420SP;
     case AV_PIX_FMT_YUV420P:        return MPP_FMT_YUV420P;
     case AV_PIX_FMT_YUYV422:        return MPP_FMT_YUV422_YUYV;
@@ -91,13 +97,14 @@ static int rkmpp_close_encoder(AVCodecContext *avctx)
 static void rkmpp_release_encoder(void *opaque, uint8_t *data)
 {
     RKMPPEncoder *encoder = (RKMPPEncoder *)data;
+	
+	mpp_buffer_put(encoder->frm_buf);
 
     if (encoder->mpi) {
         encoder->mpi->reset(encoder->ctx);
         mpp_destroy(encoder->ctx);
         encoder->ctx = NULL;
     }
-
     av_free(encoder);
 }
 
@@ -105,6 +112,11 @@ static int rkmpp_preg_config(AVCodecContext *avctx, RKMPPEncoder *encoder,
                              MppEncPrepCfg *prep_cfg)
 {
     int ret;
+	MppFrameFormat mppformat;
+	
+	mppformat = rkmpp_get_mppformat(avctx->pix_fmt);
+	
+    //av_log(avctx, AV_LOG_ERROR, "SW pixel format (code = %d)/%d.\n", avctx->sw_pix_fmt, AV_PIX_FMT_NV12);
 
     memset(prep_cfg, 0, sizeof(*prep_cfg));
     prep_cfg->change        = MPP_ENC_PREP_CFG_CHANGE_INPUT |
@@ -112,9 +124,9 @@ static int rkmpp_preg_config(AVCodecContext *avctx, RKMPPEncoder *encoder,
                               MPP_ENC_PREP_CFG_CHANGE_FORMAT;
     prep_cfg->width         = avctx->width;
     prep_cfg->height        = avctx->height;
-    prep_cfg->hor_stride    = avctx->width;
-    prep_cfg->ver_stride    = avctx->height;
-    prep_cfg->format        = rkmpp_get_mppformat(avctx->sw_pix_fmt);
+    prep_cfg->hor_stride    = MPP_ALIGN(avctx->width, 16);
+    prep_cfg->ver_stride    = MPP_ALIGN(avctx->height, 16);
+    prep_cfg->format        = (mppformat == -2 ? rkmpp_get_mppformat(avctx->sw_pix_fmt) : mppformat);
     prep_cfg->rotation      = MPP_ENC_ROT_0;
 
     ret = encoder->mpi->control(encoder->ctx, MPP_ENC_SET_PREP_CFG, prep_cfg);
@@ -135,8 +147,8 @@ static int rkmpp_rc_config(AVCodecContext *avctx, RKMPPEncoder *encoder,
     memset(rc_cfg, 0, sizeof(*rc_cfg));
     rc_cfg->change  = MPP_ENC_RC_CFG_CHANGE_ALL;
     // TODO: set by AVOption
-    rc_cfg->rc_mode = MPP_ENC_RC_MODE_CBR;
-    rc_cfg->quality = MPP_ENC_RC_QUALITY_MEDIUM;
+    rc_cfg->rc_mode = MPP_ENC_RC_MODE_FIXQP;
+    rc_cfg->quality = MPP_ENC_RC_QUALITY_CQP;
 
     if (rc_cfg->rc_mode == MPP_ENC_RC_MODE_CBR) {
         /* constant bitrate has very small bps range of 1/16 bps */
@@ -286,6 +298,10 @@ static int rkmpp_init_encoder(AVCodecContext *avctx)
     RK_S64 paramS64;
     MppEncSeiMode sei_mode;
     MppPacket packet = NULL;
+	MppFrameFormat mppformat;
+	size_t frame_size;
+	size_t header_size;
+	//MppPollType block       = MPP_POLL_NON_BLOCK;
 
     rk_context = avctx->priv_data;
     rk_context->encoder_ref = NULL;
@@ -356,7 +372,46 @@ static int rkmpp_init_encoder(AVCodecContext *avctx)
         ret = AVERROR_UNKNOWN;
         goto fail;
     }
+	
+	mppformat = rkmpp_get_mppformat(avctx->pix_fmt);
+	//av_log(avctx, AV_LOG_WARNING, "Init mppformat: %d\n", ret);
+	
+	if(mppformat >= 0){
 
+		switch (mppformat & MPP_FRAME_FMT_MASK) {
+			case MPP_FMT_YUV420SP:
+			case MPP_FMT_YUV420P: {
+				frame_size = MPP_ALIGN(MPP_ALIGN(avctx->width, 16), 64) * MPP_ALIGN(MPP_ALIGN(avctx->height, 16), 64) * 3 / 2;
+			} break;
+
+			case MPP_FMT_YUV422_YUYV :
+			case MPP_FMT_YUV422_YVYU :
+			case MPP_FMT_YUV422_UYVY :
+			case MPP_FMT_YUV422_VYUY :
+			case MPP_FMT_YUV422P:
+			case MPP_FMT_YUV422SP:
+			case MPP_FMT_RGB565:
+			case MPP_FMT_BGR565: {
+				frame_size = MPP_ALIGN(MPP_ALIGN(avctx->width, 16), 64) * MPP_ALIGN(MPP_ALIGN(avctx->height, 16), 64) * 2;
+			} break;
+
+			default: {
+				frame_size = MPP_ALIGN(MPP_ALIGN(avctx->width, 16), 64) * MPP_ALIGN(MPP_ALIGN(avctx->height, 16), 64) * 4;
+			} break;
+		}
+
+		if (MPP_FRAME_FMT_IS_FBC(mppformat)){
+			header_size = MPP_ALIGN(MPP_ALIGN(avctx->width, 16) * MPP_ALIGN(avctx->height, 16) / 16, 1024*4);
+		} else {
+			header_size = 0;
+		}
+		
+		ret = mpp_buffer_get(NULL, &encoder->frm_buf, frame_size + header_size);
+		if (ret) {
+			av_log(avctx, AV_LOG_ERROR, "failed to get buffer for input frame ret %d\n", ret);
+			goto fail;
+		}
+	}
     // TODO: osd if hardware support
 
     paramS64 = SEND_FRAME_TIMEOUT;
@@ -424,20 +479,21 @@ static int rkmpp_queue_frame(AVCodecContext *avctx, RKMPPEncoder *encoder,
     MppBufferInfo info;
     MppFrame frame = NULL;
     MppTask task = NULL;
+	void *buf;
 
     // check format
     if (avframe) {
         enum AVPixelFormat swformat;
-        if(avframe->format != AV_PIX_FMT_DRM_PRIME) {
-            av_log(avctx, AV_LOG_ERROR, "RKMPPEncoder only support fmt DRM\n");
-            return AVERROR(EINVAL);
-        }
-        swformat    = ((AVHWFramesContext*)avframe->hw_frames_ctx->data)->sw_format;
-        mppformat   = rkmpp_get_mppformat(swformat);
-        if (mppformat < 0) {
-            av_log(avctx, AV_LOG_ERROR, "Unsupport av format %d\n", swformat);
-            return AVERROR(EINVAL);
-        }
+        if(avframe->format == AV_PIX_FMT_DRM_PRIME) {
+			swformat    = ((AVHWFramesContext*)avframe->hw_frames_ctx->data)->sw_format;
+			mppformat   = rkmpp_get_mppformat(swformat);
+			if (mppformat < 0) {
+				av_log(avctx, AV_LOG_ERROR, "Unsupport av format %d\n", swformat);
+				return AVERROR(EINVAL);
+			}
+		} else {
+			mppformat   = rkmpp_get_mppformat(avframe->format);
+		}
     }
 
     ret = mpp_frame_init(&frame);
@@ -448,38 +504,61 @@ static int rkmpp_queue_frame(AVCodecContext *avctx, RKMPPEncoder *encoder,
     mpp_frame_set_eos(frame, encoder->eos_reached);
 
     if (avframe) {
-        AVDRMFrameDescriptor *desc = (AVDRMFrameDescriptor*)avframe->data[0];
-        AVDRMLayerDescriptor *layer = &desc->layers[0];
+		
+		mpp_frame_set_pts(frame, avframe->pts);
+		mpp_frame_set_dts(frame, avframe->pkt_dts);
+		mpp_frame_set_width(frame, avframe->width);
+		mpp_frame_set_height(frame, avframe->height);
 
-        mpp_frame_set_pts(frame, avframe->pts);
-        mpp_frame_set_dts(frame, avframe->pkt_dts);
-        mpp_frame_set_width(frame, avframe->width);
-        mpp_frame_set_height(frame, avframe->height);
-        if (mppformat == MPP_FMT_YUV422_YUYV || mppformat == MPP_FMT_YUV422_UYVY) {
-            mpp_frame_set_hor_stride(frame, 2 * layer->planes[0].pitch/* /bpp */);
-        } else {
-            // nv12 or yuv420p
-            mpp_frame_set_hor_stride(frame, layer->planes[0].pitch/* /bpp */);
-        }
-        if (layer->nb_planes > 1)
-            mpp_frame_set_ver_stride(frame,
-                layer->planes[1].offset / layer->planes[0].pitch);
-        else
-            mpp_frame_set_ver_stride(frame, avframe->height);
-        mpp_frame_set_fmt(frame, mppformat);
+	
+		if(avframe->format == AV_PIX_FMT_DRM_PRIME){
+			AVDRMFrameDescriptor *desc = (AVDRMFrameDescriptor*)avframe->data[0];
+			AVDRMLayerDescriptor *layer = &desc->layers[0];
+			
+			if (mppformat == MPP_FMT_YUV422_YUYV || mppformat == MPP_FMT_YUV422_UYVY) {
+				mpp_frame_set_hor_stride(frame, 2 * layer->planes[0].pitch/* /bpp */);
+			} else {
+				// nv12 or yuv420p
+				mpp_frame_set_hor_stride(frame, layer->planes[0].pitch/* /bpp */);
+			}
+			if (layer->nb_planes > 1)
+				mpp_frame_set_ver_stride(frame,
+					layer->planes[1].offset / layer->planes[0].pitch);
+			else
+				mpp_frame_set_ver_stride(frame, avframe->height);
+			mpp_frame_set_fmt(frame, mppformat);
+				
+			memset(&info, 0, sizeof(info));
+			info.type   = MPP_BUFFER_TYPE_ION;
+			info.size   = desc->objects[0].size;
+			info.fd     = desc->objects[0].fd;
+			info.ptr    = desc->objects[0].ptr;
+			
+			ret = mpp_buffer_import(&buffer, &info);
+			if (ret != MPP_OK) {
+				av_log(avctx, AV_LOG_ERROR, "Failed to import buffer\n");
+				ret = AVERROR(EINVAL);
+				goto out;
+			}
+			mpp_frame_set_buffer(frame, buffer);
+				
+		} else {
+		
+			mpp_frame_set_hor_stride(frame, MPP_ALIGN(avframe->width, 16));
+			mpp_frame_set_ver_stride(frame, MPP_ALIGN(avframe->height, 16));
+			mpp_frame_set_fmt(frame, mppformat);
 
-        memset(&info, 0, sizeof(info));
-        info.type   = MPP_BUFFER_TYPE_ION;
-        info.size   = desc->objects[0].size;
-        info.fd     = desc->objects[0].fd;
-        info.ptr    = desc->objects[0].ptr;
-        ret = mpp_buffer_import(&buffer, &info);
-        if (ret != MPP_OK) {
-            av_log(avctx, AV_LOG_ERROR, "Failed to import buffer\n");
-            ret = AVERROR(EINVAL);
-            goto out;
-        }
-        mpp_frame_set_buffer(frame, buffer);
+	  
+			buf = mpp_buffer_get_ptr(encoder->frm_buf);
+			
+			if ((av_image_copy_to_buffer(buf, mpp_buffer_get_size(encoder->frm_buf),
+					avframe->data, avframe->linesize, avframe->format,
+					avframe->width, avframe->height, 1)) < 0) {
+				ret = AVERROR_UNKNOWN;
+				goto out;
+			}
+			mpp_frame_set_buffer(frame, encoder->frm_buf);
+		}
     }
 
     ctx = encoder->ctx;
@@ -659,10 +738,6 @@ static int rkmpp_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
     return 0;
 }
 
-static const AVCodecHWConfigInternal *rkmpp_hw_configs[] = {
-    HW_CONFIG_INTERNAL(DRM_PRIME),
-    NULL
-};
 
 #define RKMPP_ENC_CLASS(NAME) \
     static const AVClass rkmpp_##NAME##_enc_class = { \
@@ -685,9 +760,8 @@ static const AVCodecHWConfigInternal *rkmpp_hw_configs[] = {
         .priv_class     = &rkmpp_##NAME##_enc_class, \
         .capabilities   = AV_CODEC_CAP_DELAY | AV_CODEC_CAP_HARDWARE, \
         .caps_internal  = FF_CODEC_CAP_INIT_CLEANUP, \
-        .pix_fmts       = (const enum AVPixelFormat[]) { AV_PIX_FMT_DRM_PRIME, \
+        .pix_fmts       = (const enum AVPixelFormat[]) { AV_PIX_FMT_DRM_PRIME, AV_PIX_FMT_NV12, \
                                                          AV_PIX_FMT_NONE }, \
-        .hw_configs     = rkmpp_hw_configs, \
         .bsfs           = BSFS, \
         .wrapper_name   = "rkmpp", \
     };

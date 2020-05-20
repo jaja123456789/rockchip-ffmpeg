@@ -94,8 +94,8 @@ endef
 $(foreach D,$(FFLIBS),$(eval $(call DOSUBDIR,lib$(D))))
 
 include $(SRC_PATH)/fftools/Makefile
-include $(SRC_PATH)/doc/Makefile
-include $(SRC_PATH)/doc/examples/Makefile
+#include $(SRC_PATH)/doc/Makefile
+#include $(SRC_PATH)/doc/examples/Makefile
 
 libavcodec/utils.o libavformat/utils.o libavdevice/avdevice.o libavfilter/avfilter.o libavutil/utils.o libpostproc/postprocess.o libswresample/swresample.o libswscale/utils.o : libavutil/ffversion.h
 
@@ -157,8 +157,8 @@ endif
 config:
 	$(SRC_PATH)/configure $(value FFMPEG_CONFIGURATION)
 
-build: all alltools examples testprogs
-check: all alltools examples testprogs fate
+build: all
+check: all fate
 
 include $(SRC_PATH)/tests/Makefile
 

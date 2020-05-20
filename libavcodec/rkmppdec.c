@@ -37,8 +37,9 @@
 #include "libavutil/hwcontext_drm.h"
 #include "libavutil/imgutils.h"
 #include "libavutil/log.h"
+#include "libavutil/opt.h"
 
-#define RECEIVE_FRAME_TIMEOUT   100
+#define RECEIVE_FRAME_TIMEOUT   500
 #define FRAMEGROUP_MAX_FRAMES   16
 #define INPUT_MAX_PACKETS       4
 
@@ -49,14 +50,19 @@ typedef struct {
 
     char first_packet;
     char eos_reached;
-
-    AVBufferRef *frames_ref;
+	
+	int isdrm;
+	
+	AVBufferRef *frames_ref;
     AVBufferRef *device_ref;
+
 } RKMPPDecoder;
 
 typedef struct {
     AVClass *av_class;
     AVBufferRef *decoder_ref;
+	
+	int drm;
 } RKMPPDecodeContext;
 
 typedef struct {
@@ -96,7 +102,7 @@ static int rkmpp_write_data(AVCodecContext *avctx, uint8_t *buffer, int size, in
     // create the MPP packet
     ret = mpp_packet_init(&packet, buffer, size);
     if (ret != MPP_OK) {
-        av_log(avctx, AV_LOG_ERROR, "Failed to init MPP packet (code = %d)\n", ret);
+        av_log(avctx, AV_LOG_ERROR, "Failed to init MPP packet  (code = %d)\n", ret);
         return AVERROR_UNKNOWN;
     }
 
@@ -142,9 +148,11 @@ static void rkmpp_release_decoder(void *opaque, uint8_t *data)
         mpp_buffer_group_put(decoder->frame_group);
         decoder->frame_group = NULL;
     }
-
-    av_buffer_unref(&decoder->frames_ref);
-    av_buffer_unref(&decoder->device_ref);
+	
+	if(decoder->isdrm > 0){
+		av_buffer_unref(&decoder->frames_ref);
+		av_buffer_unref(&decoder->device_ref);
+	}
 
     av_free(decoder);
 }
@@ -156,9 +164,8 @@ static int rkmpp_init_decoder(AVCodecContext *avctx)
     MppCodingType codectype = MPP_VIDEO_CodingUnused;
     int ret;
     RK_S64 paramS64;
-    RK_S32 paramS32;
-
-    avctx->pix_fmt = AV_PIX_FMT_DRM_PRIME;
+    //RK_S32 paramS32;
+	//MppPollType block       = MPP_POLL_NON_BLOCK;
 
     // create a decoder and a ref to it
     decoder = av_mallocz(sizeof(RKMPPDecoder));
@@ -176,6 +183,21 @@ static int rkmpp_init_decoder(AVCodecContext *avctx)
     }
 
     av_log(avctx, AV_LOG_DEBUG, "Initializing RKMPP decoder.\n");
+	
+	if(rk_context->drm >= 0){
+	    av_log(avctx, AV_LOG_DEBUG, "Using drm mode.\n");
+		decoder->isdrm = 1;
+	} else {
+		av_log(avctx, AV_LOG_DEBUG, "Using normal mode.\n");
+		decoder->isdrm = -1;
+	}
+	
+	if(decoder->isdrm >= 0){
+		avctx->pix_fmt = AV_PIX_FMT_DRM_PRIME;
+	} else {
+		avctx->pix_fmt = AV_PIX_FMT_NV12;
+	}
+
 
     codectype = rkmpp_get_codingtype(avctx);
     if (codectype == MPP_VIDEO_CodingUnused) {
@@ -194,7 +216,7 @@ static int rkmpp_init_decoder(AVCodecContext *avctx)
     // Create the MPP context
     ret = mpp_create(&decoder->ctx, &decoder->mpi);
     if (ret != MPP_OK) {
-        av_log(avctx, AV_LOG_ERROR, "Failed to create MPP context (code = %d).\n", ret);
+        av_log(avctx, AV_LOG_ERROR, "Failed to create MPP  context (code = %d).\n", ret);
         ret = AVERROR_UNKNOWN;
         goto fail;
     }
@@ -208,17 +230,17 @@ static int rkmpp_init_decoder(AVCodecContext *avctx)
     }
 
     // make decode calls blocking with a timeout
-    paramS32 = MPP_POLL_BLOCK;
-    ret = decoder->mpi->control(decoder->ctx, MPP_SET_OUTPUT_BLOCK, &paramS32);
-    if (ret != MPP_OK) {
-        av_log(avctx, AV_LOG_ERROR, "Failed to set blocking mode on MPI (code = %d).\n", ret);
-        ret = AVERROR_UNKNOWN;
-        goto fail;
-    }
-
-    paramS64 = RECEIVE_FRAME_TIMEOUT;
-    ret = decoder->mpi->control(decoder->ctx, MPP_SET_OUTPUT_BLOCK_TIMEOUT, &paramS64);
-    if (ret != MPP_OK) {
+ //   paramS32 = MPP_POLL_BLOCK;
+ //   ret = decoder->mpi->control(decoder->ctx, MPP_SET_OUTPUT_BLOCK, &paramS32);
+ //   if (ret != MPP_OK) {
+ //       av_log(avctx, AV_LOG_ERROR, "Failed to set blocking mode on MPI (code = %d).\n", ret);
+ //       ret = AVERROR_UNKNOWN;
+ //       goto fail;
+ //   }
+	
+	paramS64 = RECEIVE_FRAME_TIMEOUT;
+	ret = decoder->mpi->control(decoder->ctx, MPP_SET_OUTPUT_TIMEOUT, &paramS64);
+    if (MPP_OK != ret) {
         av_log(avctx, AV_LOG_ERROR, "Failed to set block timeout on MPI (code = %d).\n", ret);
         ret = AVERROR_UNKNOWN;
         goto fail;
@@ -240,7 +262,7 @@ static int rkmpp_init_decoder(AVCodecContext *avctx)
 
     ret = mpp_buffer_group_limit_config(decoder->frame_group, 0, FRAMEGROUP_MAX_FRAMES);
     if (ret) {
-        av_log(avctx, AV_LOG_ERROR, "Failed to set buffer group limit (code = %d)\n", ret);
+        av_log(avctx, AV_LOG_ERROR, "Failed to set buffer group limit  (code = %d)\n", ret);
         ret = AVERROR_UNKNOWN;
         goto fail;
     }
@@ -248,15 +270,17 @@ static int rkmpp_init_decoder(AVCodecContext *avctx)
     decoder->first_packet = 1;
 
     av_log(avctx, AV_LOG_DEBUG, "RKMPP decoder initialized successfully.\n");
-
-    decoder->device_ref = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_DRM);
-    if (!decoder->device_ref) {
-        ret = AVERROR(ENOMEM);
-        goto fail;
-    }
-    ret = av_hwdevice_ctx_init(decoder->device_ref);
-    if (ret < 0)
-        goto fail;
+	
+	if(decoder->isdrm >= 0){
+		decoder->device_ref = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_DRM);
+		if (!decoder->device_ref) {
+			ret = AVERROR(ENOMEM);
+			goto fail;
+		}
+		ret = av_hwdevice_ctx_init(decoder->device_ref);
+		if (ret < 0)
+			goto fail;
+	}
 
     return 0;
 
@@ -326,11 +350,11 @@ static int rkmpp_retrieve_frame(AVCodecContext *avctx, AVFrame *frame)
     int ret;
     MppFrame mppframe = NULL;
     MppBuffer buffer = NULL;
-    AVDRMFrameDescriptor *desc = NULL;
+	AVDRMFrameDescriptor *desc = NULL;
     AVDRMLayerDescriptor *layer = NULL;
     int mode;
     MppFrameFormat mppformat;
-    uint32_t drmformat;
+	uint32_t drmformat;
 
     ret = decoder->mpi->decode_get_frame(decoder->ctx, &mppframe);
     if (ret != MPP_OK && ret != MPP_ERR_TIMEOUT) {
@@ -351,26 +375,29 @@ static int rkmpp_retrieve_frame(AVCodecContext *avctx, AVFrame *frame)
             avctx->height = mpp_frame_get_height(mppframe);
 
             decoder->mpi->control(decoder->ctx, MPP_DEC_SET_INFO_CHANGE_READY, NULL);
+			
+			if(decoder->isdrm >= 0){
+				av_buffer_unref(&decoder->frames_ref);
 
-            av_buffer_unref(&decoder->frames_ref);
+				decoder->frames_ref = av_hwframe_ctx_alloc(decoder->device_ref);
+				if (!decoder->frames_ref) {
+					ret = AVERROR(ENOMEM);
+					goto fail;
+				}
 
-            decoder->frames_ref = av_hwframe_ctx_alloc(decoder->device_ref);
-            if (!decoder->frames_ref) {
-                ret = AVERROR(ENOMEM);
-                goto fail;
-            }
+				mppformat = mpp_frame_get_fmt(mppframe);
+				av_log(avctx, AV_LOG_WARNING, "MPP FRAME: %d\n",mppformat);
+				drmformat = rkmpp_get_frameformat(mppformat);
 
-            mppformat = mpp_frame_get_fmt(mppframe);
-            drmformat = rkmpp_get_frameformat(mppformat);
-
-            hwframes = (AVHWFramesContext*)decoder->frames_ref->data;
-            hwframes->format    = AV_PIX_FMT_DRM_PRIME;
-            hwframes->sw_format = av_drm_get_pixfmt(drmformat);
-            hwframes->width     = avctx->width;
-            hwframes->height    = avctx->height;
-            ret = av_hwframe_ctx_init(decoder->frames_ref);
-            if (ret < 0)
-                goto fail;
+				hwframes = (AVHWFramesContext*)decoder->frames_ref->data;
+				hwframes->format    = AV_PIX_FMT_DRM_PRIME;
+				hwframes->sw_format = av_drm_get_pixfmt(drmformat);
+				hwframes->width     = avctx->width;
+				hwframes->height    = avctx->height;
+				ret = av_hwframe_ctx_init(decoder->frames_ref);
+				if (ret < 0)
+					goto fail;
+			}
 
             // here decoder is fully initialized, we need to feed it again with data
             ret = AVERROR(EAGAIN);
@@ -394,7 +421,7 @@ static int rkmpp_retrieve_frame(AVCodecContext *avctx, AVFrame *frame)
         av_log(avctx, AV_LOG_DEBUG, "Received a frame.\n");
 
         // setup general frame fields
-        frame->format           = AV_PIX_FMT_DRM_PRIME;
+        frame->format           = (decoder->isdrm >= 0 ? AV_PIX_FMT_DRM_PRIME : AV_PIX_FMT_NV12);
         frame->width            = mpp_frame_get_width(mppframe);
         frame->height           = mpp_frame_get_height(mppframe);
         frame->pts              = mpp_frame_get_pts(mppframe);
@@ -405,67 +432,80 @@ static int rkmpp_retrieve_frame(AVCodecContext *avctx, AVFrame *frame)
 
         mode = mpp_frame_get_mode(mppframe);
         frame->interlaced_frame = ((mode & MPP_FRAME_FLAG_FIELD_ORDER_MASK) == MPP_FRAME_FLAG_DEINTERLACED);
+		//frame->interlaced_frame = 1;
         frame->top_field_first  = ((mode & MPP_FRAME_FLAG_FIELD_ORDER_MASK) == MPP_FRAME_FLAG_TOP_FIRST);
-
-        mppformat = mpp_frame_get_fmt(mppframe);
-        drmformat = rkmpp_get_frameformat(mppformat);
 
         // now setup the frame buffer info
         buffer = mpp_frame_get_buffer(mppframe);
         if (buffer) {
-            desc = av_mallocz(sizeof(AVDRMFrameDescriptor));
-            if (!desc) {
-                ret = AVERROR(ENOMEM);
-                goto fail;
-            }
+			
+			if(decoder->isdrm >= 0){
+				mppformat = mpp_frame_get_fmt(mppframe);
+				drmformat = rkmpp_get_frameformat(mppformat);
+				desc = av_mallocz(sizeof(AVDRMFrameDescriptor));
+				if (!desc) {
+					ret = AVERROR(ENOMEM);
+					goto fail;
+				}
 
-            desc->nb_objects = 1;
-            desc->objects[0].fd = mpp_buffer_get_fd(buffer);
-            desc->objects[0].ptr = mpp_buffer_get_ptr(buffer);
-            desc->objects[0].size = mpp_buffer_get_size(buffer);
+				desc->nb_objects = 1;
+				desc->objects[0].fd = mpp_buffer_get_fd(buffer);
+				desc->objects[0].ptr = mpp_buffer_get_ptr(buffer);
+				desc->objects[0].size = mpp_buffer_get_size(buffer);
 
-            desc->nb_layers = 1;
-            layer = &desc->layers[0];
-            layer->format = drmformat;
-            layer->nb_planes = 2;
+				desc->nb_layers = 1;
+				layer = &desc->layers[0];
+				layer->format = drmformat;
+				layer->nb_planes = 2;
 
-            layer->planes[0].object_index = 0;
-            layer->planes[0].offset = 0;
-            layer->planes[0].pitch = mpp_frame_get_hor_stride(mppframe);
+				layer->planes[0].object_index = 0;
+				layer->planes[0].offset = 0;
+				layer->planes[0].pitch = mpp_frame_get_hor_stride(mppframe);
 
-            layer->planes[1].object_index = 0;
-            layer->planes[1].offset = layer->planes[0].pitch * mpp_frame_get_ver_stride(mppframe);
-            layer->planes[1].pitch = layer->planes[0].pitch;
+				layer->planes[1].object_index = 0;
+				layer->planes[1].offset = layer->planes[0].pitch * mpp_frame_get_ver_stride(mppframe);
+				layer->planes[1].pitch = layer->planes[0].pitch;
+				
+				// we also allocate a struct in buf[0] that will allow to hold additionnal information
+				// for releasing properly MPP frames and decoder
+				framecontextref = av_buffer_allocz(sizeof(*framecontext));
+				if (!framecontextref) {
+					ret = AVERROR(ENOMEM);
+					goto fail;
+				}
 
-            // we also allocate a struct in buf[0] that will allow to hold additionnal information
-            // for releasing properly MPP frames and decoder
-            framecontextref = av_buffer_allocz(sizeof(*framecontext));
-            if (!framecontextref) {
-                ret = AVERROR(ENOMEM);
-                goto fail;
-            }
+				// MPP decoder needs to be closed only when all frames have been released.
+				framecontext = (RKMPPFrameContext *)framecontextref->data;
+				framecontext->decoder_ref = av_buffer_ref(rk_context->decoder_ref);
+				framecontext->frame = mppframe;
+				
+				frame->data[0]  = (uint8_t *)desc;
+				frame->buf[0]   = av_buffer_create((uint8_t *)desc, sizeof(*desc), rkmpp_release_frame,
+												   framecontextref, AV_BUFFER_FLAG_READONLY);
 
-            // MPP decoder needs to be closed only when all frames have been released.
-            framecontext = (RKMPPFrameContext *)framecontextref->data;
-            framecontext->decoder_ref = av_buffer_ref(rk_context->decoder_ref);
-            framecontext->frame = mppframe;
+				if (!frame->buf[0]) {
+					ret = AVERROR(ENOMEM);
+					goto fail;
+				}
 
-            frame->data[0]  = (uint8_t *)desc;
-            frame->buf[0]   = av_buffer_create((uint8_t *)desc, sizeof(*desc), rkmpp_release_frame,
-                                               framecontextref, AV_BUFFER_FLAG_READONLY);
+				frame->hw_frames_ctx = av_buffer_ref(decoder->frames_ref);
+				if (!frame->hw_frames_ctx) {
+					ret = AVERROR(ENOMEM);
+					goto fail;
+				}
+				
+				return 0;
+			} else {
+				uint8_t *base = NULL;
+				base = (uint8_t *)mpp_buffer_get_ptr(buffer);
 
-            if (!frame->buf[0]) {
-                ret = AVERROR(ENOMEM);
-                goto fail;
-            }
-
-            frame->hw_frames_ctx = av_buffer_ref(decoder->frames_ref);
-            if (!frame->hw_frames_ctx) {
-                ret = AVERROR(ENOMEM);
-                goto fail;
-            }
-
-            return 0;
+				if ((av_image_fill_arrays(frame->data, frame->linesize,
+										base, frame->format,
+										frame->width, frame->height, 1)) < 0) {
+					goto fail;
+				}     
+				return 0;
+			}
         } else {
             av_log(avctx, AV_LOG_ERROR, "Failed to retrieve the frame buffer, frame is dropped (code = %d)\n", ret);
             mpp_frame_deinit(&mppframe);
@@ -552,15 +592,22 @@ static void rkmpp_flush(AVCodecContext *avctx)
         av_log(avctx, AV_LOG_ERROR, "Failed to reset MPI (code = %d)\n", ret);
 }
 
-static const AVCodecHWConfigInternal *rkmpp_hw_configs[] = {
-    HW_CONFIG_INTERNAL(DRM_PRIME),
-    NULL
+#define OFFSET(x) offsetof(RKMPPDecodeContext, x)
+#define VE AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_DECODING_PARAM
+static const AVOption options[] = {
+    { "drm", "Store frames in drm.", OFFSET(drm), AV_OPT_TYPE_BOOL, { .i64 = -1 }, -1, 1, VE },
+    { NULL },
 };
+
+//static const AVCodecHWConfigInternal *rkmpp_hw_configs[] = {
+//    NULL
+//};
 
 #define RKMPP_DEC_CLASS(NAME) \
     static const AVClass rkmpp_##NAME##_dec_class = { \
         .class_name = "rkmpp_" #NAME "_dec", \
         .version    = LIBAVUTIL_VERSION_INT, \
+		.option 	= options, \
     };
 
 #define RKMPP_DEC(NAME, ID, BSFS) \
@@ -577,9 +624,6 @@ static const AVCodecHWConfigInternal *rkmpp_hw_configs[] = {
         .flush          = rkmpp_flush, \
         .priv_class     = &rkmpp_##NAME##_dec_class, \
         .capabilities   = AV_CODEC_CAP_DELAY | AV_CODEC_CAP_AVOID_PROBING | AV_CODEC_CAP_HARDWARE, \
-        .pix_fmts       = (const enum AVPixelFormat[]) { AV_PIX_FMT_DRM_PRIME, \
-                                                         AV_PIX_FMT_NONE}, \
-        .hw_configs     = rkmpp_hw_configs, \
         .bsfs           = BSFS, \
         .wrapper_name   = "rkmpp", \
     };
