@@ -373,10 +373,11 @@ static int rkmpp_init_encoder(AVCodecContext *avctx)
         goto fail;
     }
 	
-	ret = mpi->control(ctx, MPP_ENC_SET_HEADER_MODE, MPP_ENC_HEADER_MODE_EACH_IDR);
+	ret = encoder->mpi->control(encoder->ctx, MPP_ENC_SET_HEADER_MODE, MPP_ENC_HEADER_MODE_EACH_IDR);
 	if (ret) {
-		mpp_err("mpi control enc set header mode failed ret %d\n", ret);
-		goto RET;
+		av_log(avctx, AV_LOG_ERROR, "mpi control enc set header mode failed ret %d\n", ret);
+		ret = AVERROR_UNKNOWN;
+        goto fail;
 	}
 	
 	mppformat = rkmpp_get_mppformat(avctx->pix_fmt);
